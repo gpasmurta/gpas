@@ -37,6 +37,7 @@ function toDbTask(task: Omit<Task, 'id'>, userId: string) {
     timer_elapsed: task.timerElapsed || null,
     scheduled: task.scheduled || false,
     parking_lot: task.parkingLot || false,
+    completed: task.isCompleted || false,
     user_id: userId
   };
 }
@@ -57,7 +58,8 @@ function toFrontendTask(dbTask: any): Task {
     processSummary: dbTask.process_summary,
     timerElapsed: dbTask.timer_elapsed,
     scheduled: dbTask.scheduled,
-    parkingLot: dbTask.parking_lot
+    parkingLot: dbTask.parking_lot,
+    isCompleted: dbTask.completed || false
   };
 }
 
@@ -329,6 +331,7 @@ export async function updateTask(id: string, task: Partial<Task>, userId: string
   if (task.timerElapsed !== undefined) updates.timer_elapsed = task.timerElapsed || null;
   if (task.scheduled !== undefined) updates.scheduled = task.scheduled;
   if (task.parkingLot !== undefined) updates.parking_lot = task.parkingLot;
+  if (task.isCompleted !== undefined) updates.completed = task.isCompleted;
   
   const { data, error } = await supabase
     .from('tasks')
