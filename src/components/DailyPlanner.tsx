@@ -13,6 +13,7 @@ import { TimeSlot } from './TimeSlot';
 import { ParkingLot } from './ParkingLot';
 import { ErrorBoundary } from './ErrorBoundary';
 import { DailyPlannerState, MultiSlotTaskInfo } from '../types/components';
+import { DailyRecap } from './recap/DailyRecap';
 
 // Add error display component
 const ErrorDisplay: React.FC<{ error: Error | null; onDismiss: () => void }> = ({ error, onDismiss }) => {
@@ -65,10 +66,26 @@ export function DailyPlanner() {
   } = useTimeAuditStore();
   
   // Memoize tasks for the selected date
-  const { parkingLotTasks, scheduledTasks } = useMemo(() => 
-    getTasksForDate(selectedDate),
-    [selectedDate, getTasksForDate]
-  );
+  const { parkingLotTasks, scheduledTasks } = useMemo(() => {
+    try {
+      // Ensure selectedDate is a valid Date object
+      if (!(selectedDate instanceof Date) || isNaN(selectedDate.getTime())) {
+        console.error('Invalid selectedDate in DailyPlanner:', selectedDate);
+        return { parkingLotTasks: [], scheduledTasks: [] };
+      }
+      
+      console.log('DailyPlanner: getTasksForDate called with selectedDate:', selectedDate.toISOString());
+      const result = getTasksForDate(selectedDate);
+      console.log('DailyPlanner: getTasksForDate returned:', {
+        parkingLotTasksCount: result.parkingLotTasks.length,
+        scheduledTasksCount: result.scheduledTasks.length
+      });
+      return result;
+    } catch (error) {
+      console.error('Error in DailyPlanner useMemo:', error);
+      return { parkingLotTasks: [], scheduledTasks: [] };
+    }
+  }, [selectedDate, getTasksForDate]);
   
   const {
     activeTimerTask,
@@ -126,10 +143,15 @@ export function DailyPlanner() {
             // Remove from parking lot
             const updatedParkingLotTasks = localParkingLotTasks.filter(t => t.id !== taskId);
             
+            // Calculate end time based on a default 15-minute duration
+            const endTime = calculateEndTime(timeSlot, 15);
+            
             // Add to scheduled tasks
             const scheduledTask: ScheduledTask = {
               ...task,
               timeSlot,
+              startTime: timeSlot, // Set startTime to match timeSlot
+              endTime,            // Set endTime based on calculated duration
               scheduled: true,
               parkingLot: false,
               date: format(selectedDate, 'yyyy-MM-dd'),
@@ -157,28 +179,37 @@ export function DailyPlanner() {
           }
         } else {
           // Moving a scheduled task to a new time slot
-          const updatedScheduledTasks = localScheduledTasks.map(task => {
-            if (task.id === taskId) {
-              return {
-                ...task,
-                timeSlot,
-                date: format(selectedDate, 'yyyy-MM-dd')
-              };
-            }
-            return task;
-          });
-          
-          // Update state
-          setState(prev => ({
-            ...prev,
-            activeDropdown: null,
-            isHovering: null
-          }));
-          
-          // Update task state
-          updateState({
-            scheduledTasks: updatedScheduledTasks
-          });
+          const task = localScheduledTasks.find(t => t.id === taskId);
+          if (task) {
+            // Calculate new endTime while preserving the task's duration
+            const originalDuration = getDurationFromTask(task);
+            const newEndTime = calculateEndTime(timeSlot, originalDuration);
+            
+            const updatedScheduledTasks = localScheduledTasks.map(t => {
+              if (t.id === taskId) {
+                return {
+                  ...t,
+                  timeSlot,
+                  startTime: timeSlot, // Set startTime to match timeSlot
+                  endTime: newEndTime, // Update endTime based on original duration
+                  date: format(selectedDate, 'yyyy-MM-dd')
+                };
+              }
+              return t;
+            });
+            
+            // Update state
+            setState(prev => ({
+              ...prev,
+              activeDropdown: null,
+              isHovering: null
+            }));
+            
+            // Update task state
+            updateState({
+              scheduledTasks: updatedScheduledTasks
+            });
+          }
         }
       } catch (error) {
         handleError(error as Error);
@@ -189,14 +220,18 @@ export function DailyPlanner() {
   // Generate time blocks from 6 AM to 10 PM - memoize to prevent unnecessary recalculations
   const timeBlocks = useRef(generateTimeBlocks('06:00', '22:00')).current;
 
-  // Sync local state with store when selected date changes
+  // Subscribe to store updates
   useEffect(() => {
-    console.log('Syncing tasks for date:', format(selectedDate, 'yyyy-MM-dd'));
-    updateState({
-      parkingLotTasks,
-      scheduledTasks
+    const unsubscribe = useTimeAuditStore.subscribe((state) => {
+      const { parkingLotTasks: storeParkingLotTasks, scheduledTasks: storeScheduledTasks } = getTasksForDate(selectedDate);
+      updateState({
+        parkingLotTasks: storeParkingLotTasks,
+        scheduledTasks: storeScheduledTasks
+      });
     });
-  }, [selectedDate]); // Only depend on date changes
+
+    return () => unsubscribe();
+  }, [selectedDate, updateState]);
 
   // Add click handler to close dropdowns when clicking elsewhere
   useEffect(() => {
@@ -284,6 +319,13 @@ export function DailyPlanner() {
   const handleDeleteTask = async (taskId: string, isScheduled: boolean) => {
     if (confirm('Are you sure you want to delete this task?')) {
       try {
+        // First update local state optimistically
+        updateState({
+          scheduledTasks: isScheduled ? localScheduledTasks.filter(t => t.id !== taskId) : localScheduledTasks,
+          parkingLotTasks: !isScheduled ? localParkingLotTasks.filter(t => t.id !== taskId) : localParkingLotTasks
+        });
+
+        // Then delete from store
         await deleteTaskWithState(
           taskId,
           isScheduled,
@@ -291,6 +333,11 @@ export function DailyPlanner() {
         );
         setState(prev => ({ ...prev, activeDropdown: null }));
       } catch (error) {
+        // Revert local state on error
+        updateState({
+          parkingLotTasks,
+          scheduledTasks
+        });
         handleError(error as Error);
       }
     }
@@ -337,6 +384,16 @@ export function DailyPlanner() {
       const durationMinutes = getDurationFromTask(task);
       const endTime = calculateEndTime(startTime, durationMinutes);
 
+      console.log('Updating task times:', {
+        taskId,
+        oldTimeSlot: task.timeSlot,
+        newTimeSlot,
+        oldStartTime: task.startTime,
+        newStartTime: startTime,
+        oldEndTime: task.endTime,
+        newEndTime: endTime
+      });
+
       // Update the task in the store
       const updatedTask = {
         ...task,
@@ -347,11 +404,14 @@ export function DailyPlanner() {
 
       await storeUpdateScheduledTask(taskId, updatedTask);
 
-      // Update local state
+      // Update local state immediately to reflect changes
       const updatedTasks = localScheduledTasks.map(t => 
         t.id === taskId ? updatedTask : t
       );
-      updateState({ scheduledTasks: updatedTasks });
+      
+      updateState({
+        scheduledTasks: updatedTasks
+      });
     } catch (error) {
       handleError(error as Error);
     }
@@ -372,13 +432,22 @@ export function DailyPlanner() {
       if (state.selectedTask) {
         // Update existing task
         if (!taskData.parkingLot) {
+          // For scheduled tasks, ensure timeSlot matches startTime for consistency
           const updatedTask = {
             ...state.selectedTask,
             ...taskWithDate,
-            timeSlot: state.selectedTimeSlot,
+            // Ensure timeSlot and startTime are synchronized
+            timeSlot: taskData.startTime,
+            startTime: taskData.startTime,
             scheduled: true,
             parkingLot: false
           } as ScheduledTask;
+          
+          console.log('Updating scheduled task with synchronized times:', {
+            timeSlot: updatedTask.timeSlot,
+            startTime: updatedTask.startTime,
+            endTime: updatedTask.endTime
+          });
           
           // First update the store
           await storeUpdateScheduledTask(state.selectedTask.id, updatedTask);
@@ -413,13 +482,22 @@ export function DailyPlanner() {
       } else {
         // Create new task
         if (!taskData.parkingLot) {
+          // For new scheduled tasks, ensure timeSlot matches startTime
           const newTaskData = {
             ...taskWithDate,
-            timeSlot: state.selectedTimeSlot,
+            // Ensure timeSlot and startTime are synchronized
+            timeSlot: taskData.startTime,
+            startTime: taskData.startTime,
             scheduled: true,
             parkingLot: false,
             isCompleted: false
           } as Omit<ScheduledTask, 'id'>;
+          
+          console.log('Creating scheduled task with synchronized times:', {
+            timeSlot: newTaskData.timeSlot,
+            startTime: newTaskData.startTime,
+            endTime: newTaskData.endTime
+          });
           
           // Add to store first
           const result = await addScheduledTask(newTaskData);
@@ -588,7 +666,7 @@ export function DailyPlanner() {
   
   return (
     <ErrorBoundary>
-      <div className="w-full max-w-5xl mx-auto space-y-4 sm:space-y-6">
+      <div className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <style>
           {`
             @keyframes slideInFromRight {
@@ -627,121 +705,91 @@ export function DailyPlanner() {
         {/* Error Display */}
         <ErrorDisplay error={state.error} onDismiss={handleDismissError} />
 
-        {/* Parking Lot */}
-        <ParkingLot
-          tasks={localParkingLotTasks}
-          draggedTask={draggedTask}
-          isHovering={state.isHovering}
-          activeDropdown={state.activeDropdown}
-          onAddTask={handleAddParkingLotTask}
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
-          onDrop={handleParkingLotDrop}
-          onEditTask={handleEditTask}
-          onDeleteTask={handleDeleteTask}
-          setActiveDropdown={(taskId) => setState(prev => ({ ...prev, activeDropdown: taskId }))}
-          setIsHovering={(taskId) => setState(prev => ({ ...prev, isHovering: taskId }))}
-          onTaskCompletion={handleTaskCompletion}
-        />
-        
-        {/* Time Slots */}
-        <div className="bg-white rounded-lg shadow-sm overflow-hidden">
-          {timeBlocks.map((time) => {
-            // Check if this time slot is part of a multi-slot task
-            const multiSlotInfo = isPartOfMultiSlotTask(time);
-            const { isPartOf, task: multiSlotTask, position } = multiSlotInfo;
-            
-            // Show hour label only at the beginning of each hour
-            const showHourLabel = time.endsWith(':00');
-            
-            // Skip rendering if this is a middle or last part of a multi-slot task
-            if (isPartOf && (position === 'middle' || position === 'last')) {
-              return (
-                <div 
-                  key={time}
-                  className="flex border-b border-gray-100"
-                >
-                  {/* Hour label */}
-                  {showHourLabel && (
-                    <div className="w-12 sm:w-16 flex items-center justify-center">
-                      <span className="text-xs sm:text-sm font-medium text-gray-500">
-                        {formatTime(time).split(':')[0]} {formatTime(time).includes('PM') ? 'PM' : 'AM'}
-                      </span>
-                    </div>
-                  )}
-                  
-                  {/* Continuation indicator */}
-                  <div 
-                    className={cn(
-                      "flex-1 h-[60px] max-h-[60px] p-2 transition-colors",
-                      !showHourLabel && "ml-12 sm:ml-16",
-                      multiSlotTask?.energy === 'gives' ? "bg-green-50" : "bg-red-50"
-                    )}
-                  >
-                    <div className="flex items-center justify-center h-full text-gray-500 text-[10px]">
-                      <span className="truncate">Part of {multiSlotTask?.title}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            }
-            
-            return (
-              <TimeSlot
-                key={time}
-                time={time}
-                showHourLabel={showHourLabel}
-                isSlotOccupied={isSlotOccupied(time)}
-                isDragOver={dragOverTimeSlot === time}
-                tasks={localScheduledTasks}
+        {/* Main Content */}
+        <div className="bg-white rounded-lg shadow">
+          {/* Parking Lot at the top */}
+          <div className="border-b border-gray-200">
+            <div className="px-6 py-4">
+              <ParkingLot
+                tasks={localParkingLotTasks}
                 draggedTask={draggedTask}
                 isHovering={state.isHovering}
                 activeDropdown={state.activeDropdown}
-                onTimeSlotClick={handleTimeSlotClick}
+                onAddTask={handleAddParkingLotTask}
+                onTaskCompletion={handleTaskCompletion}
+                onEditTask={(task) => handleEditTask(task)}
+                onDeleteTask={(taskId) => handleDeleteTask(taskId, false)}
                 onDragStart={handleDragStart}
                 onDragEnd={handleDragEnd}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
-                onTaskCompletion={handleTaskCompletion}
-                onEditTask={handleEditTask}
-                onDeleteTask={handleDeleteTask}
-                onStartTimer={handleStartTimer}
-                onPauseTimer={handlePauseTimer}
-                onStopTimer={handleStopTimer}
+                onDrop={handleParkingLotDrop}
                 setActiveDropdown={(taskId) => setState(prev => ({ ...prev, activeDropdown: taskId }))}
                 setIsHovering={(taskId) => setState(prev => ({ ...prev, isHovering: taskId }))}
-                showExceedingAlert={showExceedingAlert}
-                activeTimerTask={activeTimerTask}
-                timerRunning={timerRunning}
-                getFormattedElapsedTime={getFormattedElapsedTime}
-                getFormattedRemainingTime={getFormattedRemainingTime}
-                getTaskCompletionPercentage={getTaskCompletionPercentage}
-                getTimerStatus={getTimerStatus}
               />
-            );
-          })}
+            </div>
+          </div>
+
+          {/* Timeline */}
+          <div className="divide-y divide-gray-200">
+            {timeBlocks.map((time) => {
+              const multiSlotInfo = isPartOfMultiSlotTask(time);
+              const showHourLabel = time.endsWith(':00');
+              const currentTask = localScheduledTasks.find(task => task.timeSlot === time);
+
+              return (
+                <TimeSlot
+                  key={time}
+                  time={time}
+                  showHourLabel={showHourLabel}
+                  tasks={localScheduledTasks}
+                  isSlotOccupied={isSlotOccupied(time)}
+                  isDragOver={dragOverTimeSlot === time}
+                  draggedTask={draggedTask}
+                  isHovering={state.isHovering}
+                  activeDropdown={state.activeDropdown}
+                  onTimeSlotClick={() => handleTimeSlotClick(time)}
+                  onTaskCompletion={handleTaskCompletion}
+                  onEditTask={(task) => handleEditTask(task)}
+                  onDeleteTask={(taskId, isScheduled) => handleDeleteTask(taskId, isScheduled)}
+                  onDragStart={handleDragStart}
+                  onDragEnd={handleDragEnd}
+                  onDragOver={handleDragOver}
+                  onDrop={handleDrop}
+                  setActiveDropdown={(taskId) => setState(prev => ({ ...prev, activeDropdown: taskId }))}
+                  setIsHovering={(taskId) => setState(prev => ({ ...prev, isHovering: taskId }))}
+                  onStartTimer={handleStartTimer}
+                  onPauseTimer={handlePauseTimer}
+                  onStopTimer={handleStopTimer}
+                  showExceedingAlert={showExceedingAlert}
+                  activeTimerTask={activeTimerTask}
+                  timerRunning={timerRunning}
+                  getFormattedElapsedTime={getFormattedElapsedTime}
+                  getFormattedRemainingTime={getFormattedRemainingTime}
+                  getTaskCompletionPercentage={getTaskCompletionPercentage}
+                  getTimerStatus={getTimerStatus}
+                />
+              );
+            })}
+          </div>
+
+          {/* Daily Recap */}
+          <div className="border-t border-gray-200 mt-4">
+            <DailyRecap date={format(selectedDate, 'yyyy-MM-dd')} className="w-full" />
+          </div>
         </div>
         
         {/* Task Modal */}
-        <TaskModal
-          isOpen={isTaskModalOpen}
-          onClose={() => {
-            setTaskModalOpen(false);
-            // Explicitly reset the selected task and time slot when closing the modal
-            setState(prev => ({ 
-              ...prev, 
-              selectedTask: undefined,
-              selectedTimeSlot: '',
-              isParkingLotTask: false
-            }));
-          }}
-          startTime={state.selectedTimeSlot}
-          onSave={handleSaveTask}
-          initialTask={state.selectedTask as ScheduledTask}
-          timeSlot={state.selectedTimeSlot}
-          onTimeChange={handleTimeSlotChange}
-          onTaskTypeChange={handleTaskTypeChange}
-        />
+        {isTaskModalOpen && (
+          <TaskModal
+            isOpen={isTaskModalOpen}
+            onClose={() => setTaskModalOpen(false)}
+            startTime={state.selectedTimeSlot}
+            initialTask={state.selectedTask as ScheduledTask}
+            onSave={handleSaveTask}
+            timeSlot={state.selectedTimeSlot}
+            onTimeChange={handleTimeSlotChange}
+            onTaskTypeChange={handleTaskTypeChange}
+          />
+        )}
       </div>
     </ErrorBoundary>
   );

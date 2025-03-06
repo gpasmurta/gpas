@@ -26,8 +26,43 @@ function AppContent() {
   // Fetch user tasks when the user is authenticated
   useEffect(() => {
     if (user) {
-      setUserId(user.id);
-      fetchUserTasks(user.id);
+      try {
+        const state = useTimeAuditStore.getState();
+        const selectedDate = state.selectedDate;
+        
+        // Check if selectedDate is a valid Date object
+        const isValidDate = selectedDate instanceof Date && !isNaN(selectedDate.getTime());
+        
+        console.log('User authenticated, setting up initial state:', {
+          userId: user.id,
+          timestamp: new Date().toISOString(),
+          selectedDate: isValidDate ? selectedDate.toISOString() : 'Invalid date',
+          isValidDate
+        });
+        
+        setUserId(user.id);
+        
+        // fetchUserTasks will use the selected date from the store
+        // The fetchUserTasks function has been updated to handle invalid dates
+        fetchUserTasks(user.id);
+        
+        // Add a debug log after 2 seconds to check if tasks were loaded
+        setTimeout(() => {
+          const updatedState = useTimeAuditStore.getState();
+          const updatedSelectedDate = updatedState.selectedDate;
+          const isUpdatedDateValid = updatedSelectedDate instanceof Date && !isNaN(updatedSelectedDate.getTime());
+          
+          console.log('Store state after initial load:', {
+            tasks: updatedState.tasks.length,
+            parkingLotTasks: updatedState.parkingLotTasks.length,
+            scheduledTasks: updatedState.scheduledTasks.length,
+            selectedDate: isUpdatedDateValid ? updatedSelectedDate.toISOString() : 'Invalid date',
+            isUpdatedDateValid
+          });
+        }, 2000);
+      } catch (error) {
+        console.error('Error in AppContent useEffect:', error);
+      }
     }
   }, [user, fetchUserTasks, setUserId]);
 

@@ -16,17 +16,80 @@ export function Timeline() {
     deleteTask, 
     selectedDate, 
     isTaskModalOpen, 
-    setTaskModalOpen
+    setTaskModalOpen,
+    scheduledTasks,
   } = useTimeAuditStore();
   
   const [selectedTime, setSelectedTime] = useState<string>('');
   const [selectedTask, setSelectedTask] = useState<Task | undefined>();
   const [isHovering, setIsHovering] = useState<string | null>(null);
 
+  // Debug logs
+  console.log('Timeline rendering with:', {
+    tasksCount: tasks.length,
+    scheduledTasksCount: scheduledTasks.length,
+    selectedDate: selectedDate.toISOString(),
+    selectedDateFormatted: format(selectedDate, 'yyyy-MM-dd')
+  });
+
+  // Log all scheduled tasks to see their properties
+  console.log('All scheduled tasks:', scheduledTasks.map(task => ({
+    id: task.id,
+    title: task.title,
+    date: task.date,
+    startTime: task.startTime,
+    endTime: task.endTime,
+    timeSlot: task.timeSlot
+  })));
+
   // Filter tasks for the selected date
-  const tasksForSelectedDate = tasks.filter((task) => 
-    isSameDay(parseISO(task.date), selectedDate)
-  );
+  const tasksForSelectedDate = scheduledTasks.filter((task) => {
+    try {
+      const taskDate = parseISO(task.date);
+      const isSame = isSameDay(taskDate, selectedDate);
+      console.log(`Task ${task.id} date check:`, {
+        taskDate: task.date,
+        parsedTaskDate: taskDate.toISOString(),
+        selectedDate: selectedDate.toISOString(),
+        isSameDay: isSame,
+        scheduled: task.scheduled
+      });
+      return isSame;
+    } catch (error) {
+      console.error(`Error parsing date for task ${task.id}:`, error);
+      return false;
+    }
+  });
+
+  console.log('Filtered tasks for selected date:', {
+    count: tasksForSelectedDate.length,
+    tasks: tasksForSelectedDate.map(t => ({
+      id: t.id,
+      title: t.title,
+      startTime: t.startTime,
+      endTime: t.endTime,
+      scheduled: t.scheduled
+    }))
+  });
+
+  // Debug logs for time blocks
+  console.log('Time blocks:', timeBlocks);
+
+  // Check how tasks are matched to time blocks
+  timeBlocks.forEach(time => {
+    const matchingTask = scheduledTasks.find(
+      (t) => t.startTime === time || (t.startTime < time && t.endTime > time)
+    );
+    if (matchingTask) {
+      console.log(`Time block ${time} has matching task:`, {
+        taskId: matchingTask.id,
+        taskTitle: matchingTask.title,
+        taskStartTime: matchingTask.startTime,
+        taskEndTime: matchingTask.endTime,
+        timeSlot: matchingTask.timeSlot
+      });
+    }
+  });
 
   const handleBlockClick = (time: string) => {
     const existingTask = tasksForSelectedDate.find(
@@ -42,6 +105,15 @@ export function Timeline() {
       ...taskData,
       date: format(selectedDate, 'yyyy-MM-dd'),
     };
+
+    console.log('Saving task with data:', {
+      taskData,
+      taskWithDate,
+      selectedDate: selectedDate.toISOString(),
+      formattedDate: format(selectedDate, 'yyyy-MM-dd'),
+      isUpdate: !!selectedTask,
+      selectedTaskId: selectedTask?.id
+    });
 
     if (selectedTask) {
       updateTask(selectedTask.id, taskWithDate);
@@ -66,8 +138,24 @@ export function Timeline() {
         <div className="bg-white rounded-lg shadow-sm overflow-hidden">
           {timeBlocks.map((time) => {
             const task = tasksForSelectedDate.find(
-              (t) => t.startTime === time || (t.startTime < time && t.endTime > time)
+              (t) => {
+                const isMatch = t.startTime === time || (t.startTime < time && t.endTime > time);
+                if (isMatch) {
+                  console.log(`Found task for time block ${time}:`, {
+                    taskId: t.id,
+                    taskTitle: t.title,
+                    taskStartTime: t.startTime,
+                    taskEndTime: t.endTime,
+                    timeBlockTime: time,
+                    startTimeMatch: t.startTime === time,
+                    inRangeMatch: t.startTime < time && t.endTime > time
+                  });
+                }
+                return isMatch;
+              }
             );
+
+            console.log(`Time block ${time} task:`, task ? task.id : 'none');
 
             return (
               <div

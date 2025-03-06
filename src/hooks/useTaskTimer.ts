@@ -5,6 +5,13 @@ import { formatElapsedTime } from '../lib/utils';
 
 export type TimerStatus = 'idle' | 'running' | 'paused' | 'stopped';
 
+interface TimerState {
+  taskTimers: Record<string, number>;
+  timeRemaining: Record<string, number>;
+  timerStatus: Record<string, TimerStatus>;
+  finalElapsedTime: Record<string, number>;
+}
+
 /**
  * Custom hook for managing task timers
  * This centralizes timer logic that was previously duplicated across components
@@ -26,13 +33,31 @@ export function useTaskTimer() {
     parkingLotTasks
   } = useTimeAuditStore();
   
-  const [taskTimers, setTaskTimers] = useState<Record<string, number>>({});
-  const [timeRemaining, setTimeRemaining] = useState<Record<string, number>>({});
+  const [timerState, setTimerState] = useState<TimerState>({
+    taskTimers: {},
+    timeRemaining: {},
+    timerStatus: {},
+    finalElapsedTime: {}
+  });
+  
   const [showExceedingAlert, setShowExceedingAlert] = useState<string | null>(null);
-  const [timerStatus, setTimerStatus] = useState<Record<string, TimerStatus>>({});
-  const [finalElapsedTime, setFinalElapsedTime] = useState<Record<string, number>>({});
   const timerIntervalRef = useRef<number | null>(null);
   const lastUpdateRef = useRef<number>(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  
+  // Initialize audio element
+  useEffect(() => {
+    if (typeof Audio !== 'undefined') {
+      audioRef.current = new Audio('/sounds/timer-end.mp3');
+    }
+    
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
   
   // Get task duration in seconds
   const getTaskDurationInSeconds = useCallback((taskId: string) => {
@@ -69,45 +94,50 @@ export function useTaskTimer() {
       const remainingSeconds = Math.max(0, taskDurationSeconds - elapsedSeconds);
       
       // Initialize state
-      setTaskTimers(prev => ({
+      setTimerState(prev => ({
         ...prev,
-        [activeTimerTask]: elapsedSeconds
-      }));
-      
-      setTimeRemaining(prev => ({
-        ...prev,
-        [activeTimerTask]: remainingSeconds
+        taskTimers: {
+          ...prev.taskTimers,
+          [activeTimerTask]: elapsedSeconds
+        },
+        timeRemaining: {
+          ...prev.timeRemaining,
+          [activeTimerTask]: remainingSeconds
+        },
+        timerStatus: {
+          ...prev.timerStatus,
+          [activeTimerTask]: 'running'
+        }
       }));
     }
 
     // Initialize timer state for all tasks from persisted data
-    [...scheduledTasks, ...parkingLotTasks].forEach(task => {
+    const allTasks = [...scheduledTasks, ...parkingLotTasks];
+    const newTimerState: TimerState = {
+      taskTimers: { ...timerState.taskTimers },
+      timeRemaining: { ...timerState.timeRemaining },
+      timerStatus: { ...timerState.timerStatus },
+      finalElapsedTime: { ...timerState.finalElapsedTime }
+    };
+    
+    allTasks.forEach(task => {
       if (task.timerElapsed && typeof task.timerElapsed === 'number') {
-        setTaskTimers(prev => ({
-          ...prev,
-          [task.id]: task.timerElapsed as number
-        }));
-
+        newTimerState.taskTimers[task.id] = task.timerElapsed;
+        
         const taskDurationSeconds = getTaskDurationInSeconds(task.id);
         const remainingSeconds = Math.max(0, taskDurationSeconds - task.timerElapsed);
-        setTimeRemaining(prev => ({
-          ...prev,
-          [task.id]: remainingSeconds
-        }));
-
+        newTimerState.timeRemaining[task.id] = remainingSeconds;
+        
         // Set final elapsed time for completed tasks
         if (!activeTimerTask || activeTimerTask !== task.id) {
-          setFinalElapsedTime(prev => {
-            const newState = { ...prev };
-            if (typeof task.timerElapsed === 'number') {
-              newState[task.id] = task.timerElapsed;
-            }
-            return newState;
-          });
+          newTimerState.finalElapsedTime[task.id] = task.timerElapsed;
+          newTimerState.timerStatus[task.id] = 'stopped';
         }
       }
     });
-  }, [activeTimerTask, timerRunning, timerStartTime, timerElapsedTime, getTaskDurationInSeconds, scheduledTasks, parkingLotTasks]);
+    
+    setTimerState(newTimerState);
+  }, []);
   
   // Handle timer updates
   useEffect(() => {
@@ -132,24 +162,34 @@ export function useTaskTimer() {
       const elapsedSeconds = Math.floor(totalElapsed / 1000);
       const remainingSeconds = Math.max(0, taskDurationSeconds - elapsedSeconds);
       
-      setTaskTimers(prev => {
-        const current = prev[activeTimerTask];
-        if (current === elapsedSeconds) return prev;
-        return { ...prev, [activeTimerTask]: elapsedSeconds };
-      });
-      
-      setTimeRemaining(prev => {
-        const current = prev[activeTimerTask];
-        if (current === remainingSeconds) return prev;
-        return { ...prev, [activeTimerTask]: remainingSeconds };
+      setTimerState(prev => {
+        const currentElapsed = prev.taskTimers[activeTimerTask];
+        const currentRemaining = prev.timeRemaining[activeTimerTask];
+        
+        if (currentElapsed === elapsedSeconds && currentRemaining === remainingSeconds) {
+          return prev;
+        }
+        
+        return {
+          ...prev,
+          taskTimers: {
+            ...prev.taskTimers,
+            [activeTimerTask]: elapsedSeconds
+          },
+          timeRemaining: {
+            ...prev.timeRemaining,
+            [activeTimerTask]: remainingSeconds
+          }
+        };
       });
       
       if (remainingSeconds === 0 && !showExceedingAlert) {
         setShowExceedingAlert(activeTimerTask);
         
         try {
-          const audio = new Audio('/sounds/timer-end.mp3');
-          audio.play().catch(err => console.error('Failed to play sound:', err));
+          if (audioRef.current) {
+            audioRef.current.play().catch(err => console.error('Failed to play sound:', err));
+          }
           
           if ('Notification' in window && Notification.permission === 'granted') {
             const task = getActiveTask();
@@ -220,16 +260,17 @@ export function useTaskTimer() {
     const actualDurationMinutes = Math.floor(totalElapsedSeconds / 60);
     const timeDifferenceMinutes = plannedDurationMinutes - actualDurationMinutes;
 
-    // Store the final elapsed time both in local state and task state
-    setFinalElapsedTime(prev => ({
+    // Store the final elapsed time
+    setTimerState(prev => ({
       ...prev,
-      [taskId]: totalElapsedSeconds
-    }));
-
-    // Update timer status to stopped
-    setTimerStatus(prev => ({
-      ...prev,
-      [taskId]: 'stopped'
+      finalElapsedTime: {
+        ...prev.finalElapsedTime,
+        [taskId]: totalElapsedSeconds
+      },
+      timerStatus: {
+        ...prev.timerStatus,
+        [taskId]: 'stopped'
+      }
     }));
 
     // Create description based on completion time
@@ -249,123 +290,93 @@ export function useTaskTimer() {
 
     // Add timer step with completion info
     await handleAddTimerStep(taskId, description);
-
+    
     // Stop the timer in the store
-    stopTimer();
+    await stopTimer();
+  }, [
+    getTaskDurationInSeconds, 
+    timerStartTime, 
+    timerElapsedTime, 
+    handleAddTimerStep, 
+    stopTimer
+  ]);
 
-    // Clear the task timers for this task
-    setTaskTimers(prev => {
-      const newTimers = { ...prev };
-      delete newTimers[taskId];
-      return newTimers;
-    });
-  }, [getTaskDurationInSeconds, timerStartTime, timerElapsedTime, handleAddTimerStep, stopTimer]);
-  
-  const handleStartTimer = useCallback((taskId: string, e?: React.MouseEvent) => {
+  const handlePauseTimer = useCallback(async (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!activeTimerTask) return;
+    
+    console.log('Pausing timer for task:', activeTimerTask);
+    
+    // Update timer status
+    setTimerState(prev => ({
+      ...prev,
+      timerStatus: {
+        ...prev.timerStatus,
+        [activeTimerTask]: 'paused'
+      }
+    }));
+    
+    await pauseTimer();
+  }, [activeTimerTask, pauseTimer]);
+
+  const handleStartTimer = useCallback(async (taskId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     console.log('Starting timer for task:', taskId);
     
-    // If there's already an active timer for a different task, stop it first
-    if (activeTimerTask && activeTimerTask !== taskId) {
-      handleStopTimer(activeTimerTask);
-      return; // Exit early to let the stop timer complete before starting new timer
+    // If there's an active timer for a different task, pause it first
+    if (activeTimerTask && activeTimerTask !== taskId && timerRunning) {
+      await handlePauseTimer();
     }
     
-    // If this task is already running, don't start it again
-    if (activeTimerTask === taskId && timerRunning) {
-      console.log('Task is already running:', taskId);
-      return;
-    }
-    
-    setShowExceedingAlert(null);
-    
-    // Initialize remaining time for this task
-    const taskDurationSeconds = getTaskDurationInSeconds(taskId);
-    console.log('Setting initial remaining time:', taskDurationSeconds);
-    setTimeRemaining(prev => ({
+    // Update timer status
+    setTimerState(prev => ({
       ...prev,
-      [taskId]: taskDurationSeconds
+      timerStatus: {
+        ...prev.timerStatus,
+        [taskId]: 'running'
+      }
     }));
     
-    // Start the timer in the store
-    startTimer(taskId);
-  }, [activeTimerTask, timerRunning, getTaskDurationInSeconds, startTimer, handleStopTimer]);
-  
-  const handlePauseTimer = useCallback((e?: React.MouseEvent) => {
-    if (e) e.stopPropagation();
-    console.log('Pausing timer');
-    
-    if (activeTimerTask) {
-      setTimerStatus(prev => ({
-        ...prev,
-        [activeTimerTask]: 'paused'
-      }));
-    }
-    
-    pauseTimer();
-  }, [pauseTimer, activeTimerTask]);
-  
-  const handleDismissExceedingAlert = useCallback(() => {
-    setShowExceedingAlert(null);
-  }, []);
-  
-  // Get timer status for a task
-  const getTimerStatus = useCallback((taskId: string): TimerStatus => {
-    // Only return 'running' if this is the active timer and it's actually running
-    if (timerRunning && activeTimerTask === taskId) {
-      return 'running';
-    }
-    return timerStatus[taskId] || 'idle';
-  }, [timerStatus, activeTimerTask, timerRunning]);
-  
-  // Get formatted elapsed time for a task
-  const getFormattedElapsedTime = useCallback((taskId: string, defaultElapsed: number = 0) => {
-    const status = getTimerStatus(taskId);
-    
-    // For stopped tasks, get the elapsed time from the task itself
-    if (status === 'stopped') {
-      const task = scheduledTasks.find(t => t.id === taskId) || 
-                  parkingLotTasks.find(t => t.id === taskId);
-      if (task && task.timerElapsed) {
-        return formatElapsedTime(task.timerElapsed);
-      }
-    }
-    
-    // For running or paused tasks, use the current timer state
-    const elapsed = taskTimers[taskId] || defaultElapsed;
-    return formatElapsedTime(elapsed);
-  }, [taskTimers, finalElapsedTime, getTimerStatus, scheduledTasks, parkingLotTasks]);
-  
-  // Get formatted remaining time for a task
-  const getFormattedRemainingTime = useCallback((taskId: string) => {
-    const remaining = timeRemaining[taskId] || getTaskDurationInSeconds(taskId);
-    return formatElapsedTime(remaining);
-  }, [timeRemaining, getTaskDurationInSeconds]);
-  
-  // Get task completion percentage
-  const getTaskCompletionPercentage = useCallback((taskId: string) => {
+    await startTimer(taskId);
+  }, [activeTimerTask, timerRunning, handlePauseTimer, startTimer]);
+
+  // Format elapsed time for display
+  const getFormattedElapsedTime = useCallback((taskId: string, defaultElapsed: number = 0): string => {
+    const elapsedSeconds = timerState.taskTimers[taskId] ?? defaultElapsed;
+    return formatElapsedTime(elapsedSeconds);
+  }, [timerState.taskTimers]);
+
+  // Format remaining time for display
+  const getFormattedRemainingTime = useCallback((taskId: string): string => {
+    const remainingSeconds = timerState.timeRemaining[taskId] ?? 0;
+    return formatElapsedTime(remainingSeconds);
+  }, [timerState.timeRemaining]);
+
+  // Calculate task completion percentage
+  const getTaskCompletionPercentage = useCallback((taskId: string): number => {
     const taskDurationSeconds = getTaskDurationInSeconds(taskId);
     if (taskDurationSeconds === 0) return 0;
     
-    const elapsed = taskTimers[taskId] || 0;
-    return Math.min(100, Math.round((elapsed / taskDurationSeconds) * 100));
-  }, [taskTimers, getTaskDurationInSeconds]);
-  
+    const elapsedSeconds = timerState.taskTimers[taskId] ?? 0;
+    return Math.min(100, Math.round((elapsedSeconds / taskDurationSeconds) * 100));
+  }, [timerState.taskTimers, getTaskDurationInSeconds]);
+
+  // Get timer status for a task
+  const getTimerStatus = useCallback((taskId: string): TimerStatus => {
+    return timerState.timerStatus[taskId] ?? 'idle';
+  }, [timerState.timerStatus]);
+
   return {
     activeTimerTask,
     timerRunning,
-    taskTimers,
-    timeRemaining,
     showExceedingAlert,
     handleStartTimer,
     handlePauseTimer,
     handleStopTimer,
-    handleAddTimerStep,
-    handleDismissExceedingAlert,
-    checkExceedingDuration,
     getFormattedElapsedTime,
     getFormattedRemainingTime,
     getTaskCompletionPercentage,
-    getTimerStatus
+    getTimerStatus,
+    checkExceedingDuration
   };
 }

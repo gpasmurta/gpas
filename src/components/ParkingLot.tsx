@@ -9,7 +9,7 @@ interface ParkingLotProps {
   isHovering: string | null;
   activeDropdown: string | null;
   onAddTask: () => void;
-  onDragStart: (e: React.DragEvent, taskId: string) => void;
+  onDragStart: (e: React.DragEvent, taskId: string, source: 'scheduledTasks' | 'parkingLot') => void;
   onDragEnd: () => void;
   onDrop: (e: React.DragEvent) => void;
   onEditTask: (task: ParkingLotTask) => void;
@@ -65,7 +65,7 @@ export function ParkingLot({
                 draggedTask === task.id && "opacity-50"
               )}
               draggable
-              onDragStart={(e) => onDragStart(e, task.id)}
+              onDragStart={(e) => onDragStart(e, task.id, 'parkingLot')}
               onDragEnd={onDragEnd}
               onMouseEnter={() => setIsHovering(task.id)}
               onMouseLeave={() => setIsHovering(null)}
@@ -119,9 +119,7 @@ export function ParkingLot({
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (window.confirm('Are you sure you want to delete this task?')) {
-                        onDeleteTask(task.id, false);
-                      }
+                      onDeleteTask(task.id, false);
                     }}
                     className="p-1 text-gray-500 hover:text-red-600 rounded-full hover:bg-red-50"
                     title="Delete task"

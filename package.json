@@ -11,9 +11,11 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.7",
+    "@types/dotenv": "^6.1.1",
     "@types/react-time-picker": "^4.0.3",
     "clsx": "^2.1.0",
     "date-fns": "^3.3.1",
+    "dotenv": "^16.4.7",
     "lucide-react": "^0.344.0",
     "openai": "^4.28.0",
     "react": "^18.3.1",

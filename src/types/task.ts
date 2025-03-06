@@ -1,3 +1,5 @@
+export type TaskCategory = 'work' | 'personal' | 'health' | 'learning';
+
 export interface BaseTask {
   id: string;
   title: string;
@@ -9,9 +11,10 @@ export interface BaseTask {
   scheduled?: boolean;
   parkingLot?: boolean;
   value?: number;
-  category?: string;
+  category: TaskCategory;
   startTime?: string;
   endTime?: string;
+  timerElapsed?: number;
 }
 
 export interface ScheduledTask extends BaseTask {

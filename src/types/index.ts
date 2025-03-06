@@ -1,4 +1,4 @@
-export type TaskCategory = 'work' | 'personal' | 'health' | 'learning' | 'other';
+export type TaskCategory = 'work' | 'personal' | 'health' | 'learning';
 
 export interface Task {
   id: string;

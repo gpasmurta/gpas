@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { TaskCategory } from '../types';
+import { useSettingsStore } from '../stores/settingsStore';
 
 // Initialize the OpenAI client
 // In a production app, you would store this key securely in environment variables
@@ -10,6 +11,9 @@ const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
   dangerouslyAllowBrowser: true // Only for demo purposes
 });
+
+// Helper function to get the current model
+const getCurrentModel = () => useSettingsStore.getState().openAIModel;
 
 // Map OpenAI response to our task categories
 const categoryMapping: Record<string, TaskCategory> = {
@@ -37,7 +41,7 @@ export async function categorizeTask(taskTitle: string): Promise<TaskCategory> {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+      model: getCurrentModel(),
       messages: [
         {
           role: 'system',
@@ -112,7 +116,7 @@ export async function summarizeProcess(processDescription: string): Promise<stri
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-3.5-turbo',
+      model: getCurrentModel(),
       messages: [
         {
           role: 'system',
@@ -159,4 +163,37 @@ function fallbackSummarize(text: string): string {
     .filter(step => step.length > 0);
   
   return steps.join(' | ');
+}
+
+export async function testOpenAIConnection(): Promise<{ isWorking: boolean; error?: string }> {
+  if (!OPENAI_API_KEY) {
+    return { 
+      isWorking: false, 
+      error: 'OpenAI API key not found. Please check your .env file and ensure VITE_OPENAI_API_KEY is set.' 
+    };
+  }
+
+  try {
+    // Try a simple API call
+    const response = await openai.chat.completions.create({
+      model: getCurrentModel(),
+      messages: [
+        {
+          role: 'user',
+          content: 'test'
+        }
+      ],
+      max_tokens: 5
+    });
+
+    return {
+      isWorking: true
+    };
+  } catch (error) {
+    console.error('OpenAI API test failed:', error);
+    return {
+      isWorking: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred while testing OpenAI connection'
+    };
+  }
 }

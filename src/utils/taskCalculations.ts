@@ -1,5 +1,37 @@
 import { Task, TaskCategory } from '../types';
-import { differenceInMinutes } from 'date-fns';
+import { differenceInMinutes, parse, isValid, format } from 'date-fns';
+
+function convertTo24Hour(timeStr: string): string {
+  try {
+    // If it's already in 24-hour format, return as is
+    if (timeStr.match(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/)) {
+      return timeStr;
+    }
+
+    // Parse 12-hour format
+    const match = timeStr.match(/^(\d{1,2}):(\d{2})\s?(AM|PM)$/i);
+    if (!match) {
+      console.warn('Invalid time format:', timeStr);
+      return timeStr;
+    }
+
+    let [_, hours, minutes, period] = match;
+    let hour = parseInt(hours, 10);
+
+    // Convert to 24-hour format
+    if (period.toUpperCase() === 'PM' && hour !== 12) {
+      hour += 12;
+    } else if (period.toUpperCase() === 'AM' && hour === 12) {
+      hour = 0;
+    }
+
+    // Pad with zeros
+    return `${hour.toString().padStart(2, '0')}:${minutes}`;
+  } catch (error) {
+    console.error('Error converting time format:', error);
+    return timeStr;
+  }
+}
 
 export function safeCalculateDuration(task: Task): number {
   try {
@@ -7,7 +39,26 @@ export function safeCalculateDuration(task: Task): number {
       console.warn('Task missing start or end time:', task);
       return 0;
     }
-    return Math.max(0, differenceInMinutes(task.endTime, task.startTime));
+
+    // Convert times to 24-hour format
+    const start24 = convertTo24Hour(task.startTime);
+    const end24 = convertTo24Hour(task.endTime);
+
+    // Parse the time strings into Date objects
+    const startTime = parse(start24, 'HH:mm', new Date());
+    const endTime = parse(end24, 'HH:mm', new Date());
+
+    if (!isValid(startTime) || !isValid(endTime)) {
+      console.warn('Invalid time format:', { 
+        original: { startTime: task.startTime, endTime: task.endTime },
+        converted: { startTime: start24, endTime: end24 }
+      });
+      return 0;
+    }
+
+    // Calculate duration in minutes
+    const duration = Math.max(0, (endTime.getTime() - startTime.getTime()) / (1000 * 60));
+    return duration;
   } catch (error) {
     console.error('Error calculating task duration:', error);
     return 0;
@@ -15,16 +66,27 @@ export function safeCalculateDuration(task: Task): number {
 }
 
 export function isValidTask(task: Task): boolean {
-  return (
-    task &&
-    typeof task === 'object' &&
-    typeof task.id === 'string' &&
-    typeof task.title === 'string' &&
-    task.startTime instanceof Date &&
-    task.endTime instanceof Date &&
-    task.endTime >= task.startTime &&
-    safeCalculateDuration(task) > 0
-  );
+  try {
+    if (!task || typeof task !== 'object') return false;
+    if (typeof task.id !== 'string' || !task.id) return false;
+    if (typeof task.title !== 'string' || !task.title) return false;
+    if (!task.startTime || !task.endTime) return false;
+
+    // Convert and validate the time strings
+    const start24 = convertTo24Hour(task.startTime);
+    const end24 = convertTo24Hour(task.endTime);
+
+    const startTime = parse(start24, 'HH:mm', new Date());
+    const endTime = parse(end24, 'HH:mm', new Date());
+
+    if (!isValid(startTime) || !isValid(endTime)) return false;
+    if (endTime <= startTime) return false;
+
+    return safeCalculateDuration(task) > 0;
+  } catch (error) {
+    console.error('Error validating task:', error);
+    return false;
+  }
 }
 
 export function calculateEnergyBalance(tasks: Task[]): number {

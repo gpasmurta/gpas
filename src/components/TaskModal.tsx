@@ -42,11 +42,18 @@ import { Task, TaskValue, EnergyLevel, TaskCategory, ScheduledTask } from '../ty
 import { X, Zap, Battery, Loader2, Mic, MicOff, FileText, RefreshCw } from 'lucide-react';
 import { cn, formatTimeWithValidation, calculateEndTime } from '../lib/utils';
 import { addMinutes, format, parse, isValid } from 'date-fns';
-import { summarizeProcess, transcribeAudio } from '../lib/openai';
+import { summarizeProcess, transcribeAudio, testOpenAIConnection } from '../lib/openai';
+import OpenAI from 'openai';
 import TimePicker from 'react-time-picker';
 import 'react-time-picker/dist/TimePicker.css';
 import 'react-clock/dist/Clock.css';
 import '../styles/time-picker.css';
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: import.meta.env.VITE_OPENAI_API_KEY || '',
+  dangerouslyAllowBrowser: true // Only for demo purposes
+});
 
 // Define the Value type for react-time-picker
 type TimePickerValue = string | null;
@@ -105,6 +112,8 @@ export function TaskModal({
   // Debounce timer for API calls
   const debounceTimerRef = useRef<number | null>(null);
 
+  const [isTestingAPI, setIsTestingAPI] = useState(false);
+
   // Reset form when modal is opened or initialTask changes
   useEffect(() => {
     // Only reset the form if the modal is open
@@ -133,9 +142,13 @@ export function TaskModal({
       setValue(initialTask.value);
       setNotes(initialTask.notes ?? '');
       setDuration(calculateDurationBlocks(initialTask.startTime, initialTask.endTime));
-      setStartTime(initialTask.startTime);
+      
+      // Always ensure timeSlot, startTime, and endTime are in sync
+      const timeSlotToUse = initialTask.timeSlot || initialTask.startTime;
+      setTimeSlot(timeSlotToUse);
+      setStartTime(timeSlotToUse); // Set start time to match the time slot
       setEndTime(initialTask.endTime);
-      setTimeSlot(initialTask.timeSlot ?? initialTask.startTime);
+      
       setCategorySource('user');
       setProcessDescription(initialTask.processDescription ?? '');
       setProcessSummary(initialTask.processSummary ?? '');
@@ -148,14 +161,18 @@ export function TaskModal({
       setValue('medium');
       setNotes('');
       setDuration(1);
-      setStartTime(initialStartTime ?? '09:00');
-      setEndTime(calculateEndTime(initialStartTime ?? '09:00', 15));
-      setTimeSlot(initialStartTime ?? '09:00');
+      
+      // For new tasks, ensure timeSlot and startTime match the initial time slot
+      const timeSlotToUse = initialTimeSlot || initialStartTime || '09:00';
+      setTimeSlot(timeSlotToUse);
+      setStartTime(timeSlotToUse); // Set start time to match the time slot
+      setEndTime(calculateEndTime(timeSlotToUse, 15)); // Calculate end time based on the time slot
+      
       setCategorySource('default');
       setProcessDescription('');
       setProcessSummary('');
     }
-  }, [initialTask, initialStartTime, isOpen]);
+  }, [initialTask, initialStartTime, initialTimeSlot, isOpen]);
 
   // Clean up form state when modal is closed
   useEffect(() => {
@@ -254,7 +271,9 @@ export function TaskModal({
         recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
           let transcript = '';
           for (let i = 0; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript;
+            if (event.results[i][0].confidence > 0.5) {
+              transcript += event.results[i][0].transcript + ' ';
+            }
           }
           setProcessDescription(transcript);
         };
@@ -291,108 +310,145 @@ export function TaskModal({
     };
   }, [isRecording]);
 
-  // Start recording with MediaRecorder (preferred) or fallback to SpeechRecognition
+  /**
+   * Handles starting the voice recording process
+   * Initializes both MediaRecorder for audio recording and SpeechRecognition for real-time transcription
+   */
   const startRecording = async () => {
     try {
       // Reset recording state
-      setRecordingTime(0);
       audioChunksRef.current = [];
+      setProcessDescription('');
+      setRecordingTime(0);
       
-      // Try to use MediaRecorder for better quality
+      // Request microphone access
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
+      // Initialize MediaRecorder for saving the audio
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       
+      // Set up event handlers for the MediaRecorder
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
       
-      mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+      // Initialize SpeechRecognition for real-time transcription
+      if ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = new SpeechRecognition();
+        recognitionRef.current = recognition;
         
-        // Stop all tracks in the stream
-        stream.getTracks().forEach(track => track.stop());
+        recognition.continuous = true;
+        recognition.interimResults = true;
         
-        // Clear recording timer
-        if (recordingTimerRef.current) {
-          window.clearInterval(recordingTimerRef.current);
-          recordingTimerRef.current = null;
-        }
+        recognition.onresult = (event) => {
+          let transcript = '';
+          
+          // Combine all results into a single transcript
+          for (let i = 0; i < event.results.length; i++) {
+            if (event.results[i][0].confidence > 0.5) {
+              transcript += event.results[i][0].transcript + ' ';
+            }
+          }
+          
+          if (transcript.trim()) {
+            setProcessDescription(prev => {
+              const newText = prev ? `${prev} ${transcript}` : transcript;
+              return newText.trim();
+            });
+          }
+        };
         
-        // Transcribe the audio using OpenAI Whisper API
-        try {
-          setIsSummarizing(true);
-          const transcript = await transcribeAudio(audioBlob);
-          setProcessDescription(transcript);
-          setIsSummarizing(false);
-        } catch (error) {
-          console.error('Error transcribing audio:', error);
-          alert('Failed to transcribe audio. Please try again or type your process description.');
-          setIsSummarizing(false);
-        }
-      };
+        recognition.onerror = (event) => {
+          console.error('Speech recognition error:', event.error, event.message);
+        };
+        
+        recognition.onend = () => {
+          // Restart recognition if we're still recording
+          if (isRecording && recognitionRef.current) {
+            recognitionRef.current.start();
+          }
+        };
+        
+        // Start the recognition
+        recognition.start();
+      } else {
+        console.warn('Speech recognition not supported in this browser');
+      }
       
-      // Start recording
+      // Start the MediaRecorder
       mediaRecorder.start();
-      setIsRecording(true);
       
-      // Start timer to track recording duration
+      // Start the recording timer
       recordingTimerRef.current = window.setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
       
+      // Update recording state
+      setIsRecording(true);
     } catch (error) {
-      console.error('Error starting MediaRecorder:', error);
-      
-      // Fallback to SpeechRecognition if MediaRecorder fails
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-          setIsRecording(true);
-          
-          // Start timer to track recording duration
-          recordingTimerRef.current = window.setInterval(() => {
-            setRecordingTime(prev => prev + 1);
-          }, 1000);
-        } catch (recError) {
-          console.error('Error starting speech recognition:', recError);
-          alert('Failed to start recording. Please check your microphone permissions and try again.');
-        }
-      } else {
-        alert('Speech recognition is not supported in your browser. Please type your process description.');
-      }
+      console.error('Error starting recording:', error);
+      alert('Could not access microphone. Please check your permissions and try again.');
     }
   };
-
-  // Stop recording
+  
+  /**
+   * Handles stopping the voice recording process
+   * Stops both MediaRecorder and SpeechRecognition
+   */
   const stopRecording = () => {
-    // Stop MediaRecorder if active
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
+    // Stop the MediaRecorder if it exists
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
+      
+      // Process the recorded audio
+      mediaRecorderRef.current.onstop = async () => {
+        try {
+          // Create a blob from the audio chunks
+          const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+          
+          // If we have SpeechRecognition results, use those
+          // Otherwise, send the audio to the server for transcription
+          if (!processDescription && audioBlob.size > 0) {
+            setIsSummarizing(true);
+            const transcription = await transcribeAudio(audioBlob);
+            setProcessDescription(transcription);
+            setIsSummarizing(false);
+          }
+        } catch (error) {
+          console.error('Error processing recording:', error);
+          setIsSummarizing(false);
+        }
+      };
     }
     
-    // Stop SpeechRecognition if active
+    // Stop the SpeechRecognition if it exists
     if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (error) {
-        console.error('Error stopping speech recognition:', error);
-      }
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
     }
     
-    // Clear recording timer
+    // Stop the recording timer
     if (recordingTimerRef.current) {
-      window.clearInterval(recordingTimerRef.current);
+      clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
     }
     
+    // Release the microphone
+    if (mediaRecorderRef.current && mediaRecorderRef.current.stream) {
+      mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+    }
+    
+    // Update recording state
     setIsRecording(false);
   };
-
-  // Toggle recording
+  
+  /**
+   * Toggles the recording state
+   */
   const toggleRecording = () => {
     if (isRecording) {
       stopRecording();
@@ -400,42 +456,32 @@ export function TaskModal({
       startRecording();
     }
   };
-
-  // Format recording time as MM:SS
+  
+  /**
+   * Formats the recording time for display
+   */
   const formatRecordingTime = (seconds: number): string => {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
     return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
   };
-
-  // Generate summary from transcript using OpenAI
+  
+  /**
+   * Handles generating a summary of the process description using AI
+   */
   const handleGenerateSummary = async () => {
     if (!processDescription.trim()) {
+      alert('Please record or type a process description first.');
       return;
     }
     
-    setIsSummarizing(true);
-    
     try {
-      // Use OpenAI to generate a better summary
+      setIsSummarizing(true);
       const summary = await summarizeProcess(processDescription);
       setProcessSummary(summary);
     } catch (error) {
       console.error('Error generating summary:', error);
-      
-      // Fallback to simple summarization
-      const cleanedText = processDescription
-        .trim()
-        .replace(/\s+/g, ' ') // Remove extra spaces
-        .replace(/(\r\n|\n|\r)/gm, ' '); // Remove line breaks
-      
-      // Split on common separators and join with pipe for brevity
-      const steps = cleanedText
-        .split(/\s*(?:and|,|then|next|after that|finally)\s*/i)
-        .map(step => step.trim())
-        .filter(step => step.length > 0);
-      
-      setProcessSummary(steps.join(' | '));
+      alert('Failed to generate summary. Please try again.');
     } finally {
       setIsSummarizing(false);
     }
@@ -472,10 +518,47 @@ export function TaskModal({
     }
   }
 
-  // Mock function for categorizing tasks (to be replaced with actual implementation)
+  // Categorize tasks using OpenAI
   async function categorizeTask(): Promise<TaskCategory> {
-    // This is a placeholder - in a real implementation, this would call an API
-    return 'work';
+    if (!title.trim()) return 'personal';
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a task categorization assistant. Your primary goal is to accurately categorize tasks into one of these categories: personal, work, health, finance, education, social, errands, home, admin, creative, strategic, meetings.
+
+Key rules:
+- If the task contains words like "meeting", "sync", "catchup", "1:1", "one-on-one", categorize as "meetings"
+- If it's work-related, categorize as "work" unless it fits better in meetings/admin/strategic
+- Respond with ONLY the category name, nothing else.`
+          },
+          {
+            role: 'user',
+            content: title
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 20
+      });
+
+      const suggestedCategory = response.choices[0]?.message.content?.toLowerCase().trim();
+      
+      // Validate that the suggested category is a valid TaskCategory
+      const validCategories: TaskCategory[] = ['personal', 'work', 'health', 'finance', 'education', 'social', 'errands', 'home', 'admin', 'creative', 'strategic', 'meetings'];
+      
+      if (suggestedCategory && validCategories.includes(suggestedCategory as TaskCategory)) {
+        return suggestedCategory as TaskCategory;
+      }
+      
+      // Default to personal if the API returns an invalid category
+      return 'personal';
+    } catch (error) {
+      console.error('Error categorizing task:', error);
+      return 'personal';
+    }
   }
 
   // Add time validation function
@@ -500,84 +583,116 @@ export function TaskModal({
     return { isValid: true };
   };
 
-  // Update time slot management functions with proper types
+  // Handle duration change
+  const handleDurationChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newDuration = parseInt(e.target.value, 10);
+    setDuration(newDuration);
+    
+    // When duration changes, recalculate the end time based on the start time
+    const newEndTime = calculateEndTime(startTime, newDuration * 15);
+    setEndTime(newEndTime);
+  };
+
+  // Handle start time change
   const handleStartTimeChange = (value: TimePickerValue) => {
-    if (value) {
-      const validation = validateTimeChange(value, endTime);
-      if (!validation.isValid) {
-        alert(validation.error);
-        return;
-      }
-
-      setStartTime(value);
-      // Calculate new time slot based on the selected time
-      const newTimeSlot = format(parse(value, 'HH:mm', new Date()), 'HH:mm');
-      setTimeSlot(newTimeSlot);
+    if (!value) return;
+    
+    try {
+      const formattedStartTime = formatTimeWithValidation(value, 'HH:mm');
+      setStartTime(formattedStartTime);
+      setTimeSlot(formattedStartTime); // Keep timeSlot in sync with startTime
       
-      // Update the task's position in the timeline
+      // When start time changes, recalculate the end time
+      const newEndTime = calculateEndTime(formattedStartTime, duration * 15);
+      setEndTime(newEndTime);
+      
+      // If this is an existing task and we have the onTimeChange callback, call it
       if (initialTask?.id && onTimeChange) {
-        onTimeChange(initialTask.id, newTimeSlot);
+        onTimeChange(initialTask.id, formattedStartTime);
       }
-      
-      // Update duration based on new start time
-      const newDuration = calculateDurationBlocks(value, endTime);
-      setDuration(newDuration);
+    } catch (error) {
+      console.error('Invalid start time format:', error);
     }
   };
 
+  // Handle end time change
   const handleEndTimeChange = (value: TimePickerValue) => {
-    if (value) {
-      const validation = validateTimeChange(startTime, value);
-      if (!validation.isValid) {
-        alert(validation.error);
-        return;
+    if (!value) return;
+    
+    try {
+      const formattedEndTime = formatTimeWithValidation(value, 'HH:mm');
+      setEndTime(formattedEndTime);
+      
+      // When end time changes, recalculate the duration
+      const start = parse(startTime, 'HH:mm', new Date());
+      const end = parse(formattedEndTime, 'HH:mm', new Date());
+      
+      if (isValid(start) && isValid(end)) {
+        const durationMinutes = (end.getTime() - start.getTime()) / (1000 * 60);
+        const newDuration = Math.max(1, Math.ceil(durationMinutes / 15)); // Round up to nearest 15-min block
+        setDuration(newDuration);
       }
-
-      setEndTime(value);
-      // Update duration based on new end time
-      const newDuration = calculateDurationBlocks(startTime, value);
-      setDuration(newDuration);
+    } catch (error) {
+      console.error('Invalid end time format:', error);
     }
   };
 
+  // When task is saved, update the state
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    try {
-      const formattedDate = initialTask?.date || format(new Date(), 'yyyy-MM-dd');
-      
-      const taskData: Omit<ScheduledTask, 'id'> = {
+    console.log('Saving task with times:', {
+      isParkingLotTask,
+      startTime,
+      endTime,
+      timeSlot
+    });
+    
+    // Validate required fields
+    if (!title.trim()) {
+      alert('Please enter a task title');
+      return;
+    }
+    
+    // Create the task object based on task type
+    if (isParkingLotTask) {
+      onSave({
         title,
         category,
         energy,
         value,
-        notes: notes || undefined,
-        startTime,
+        notes,
+        parkingLot: true,
+        scheduled: false,
+        startTime: '00:00', // Parking lot tasks don't have a specific start time
+        endTime: '00:00',   // Parking lot tasks don't have a specific end time
+        timeSlot: '',       // Parking lot tasks don't have a time slot
+        date: format(new Date(), 'yyyy-MM-dd'),
+        isCompleted: initialTask?.isCompleted ?? false,
+        processDescription,
+        processSummary,
+      });
+    } else {
+      // For scheduled tasks, ensure timeSlot, startTime and endTime are in sync
+      onSave({
+        title,
+        category,
+        energy,
+        value,
+        notes,
+        parkingLot: false,
+        scheduled: true,
+        startTime: startTime, // Use timeSlot as the start time for scheduled tasks
         endTime,
-        timeSlot,
-        processDescription: processDescription || undefined,
-        processSummary: processSummary || undefined,
-        timerElapsed: initialTask?.timerElapsed || undefined,
-        timerSteps: initialTask?.timerSteps || undefined,
-        scheduled: !isParkingLotTask,
-        parkingLot: isParkingLotTask,
-        date: formattedDate,
-        isCompleted: initialTask?.isCompleted ?? false
-      };
-
-      onSave(taskData);
-      
-      // Reset the previous task ref when submitting a new task
-      if (!initialTask) {
-        previousTaskRef.current = null;
-        previousTaskTypeRef.current = null;
-      }
-      
-      onClose();
-    } catch (error) {
-      console.error('Error saving task:', error);
-      alert('An error occurred while saving the task. Please check your inputs and try again.');
+        timeSlot: startTime,  // Keep timeSlot and startTime in sync
+        date: format(new Date(), 'yyyy-MM-dd'),
+        isCompleted: initialTask?.isCompleted ?? false,
+        processDescription,
+        processSummary,
+      });
     }
+    
+    onClose();
   };
 
   // Safely format the start time
@@ -633,6 +748,22 @@ export function TaskModal({
     });
   };
 
+  const handleTestOpenAI = async () => {
+    setIsTestingAPI(true);
+    try {
+      const result = await testOpenAIConnection();
+      if (result.isWorking) {
+        alert('OpenAI API is working correctly!');
+      } else {
+        alert(`OpenAI API Error: ${result.error}`);
+      }
+    } catch (error) {
+      alert('Error testing OpenAI connection');
+    } finally {
+      setIsTestingAPI(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
@@ -640,12 +771,32 @@ export function TaskModal({
           <h2 className="text-base sm:text-lg font-semibold">
             {modalTitle}
           </h2>
-          <button
-            onClick={onClose}
-            className="text-gray-500 hover:text-gray-700"
-          >
-            <X className="w-4 h-4 sm:w-5 sm:h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleTestOpenAI}
+              disabled={isTestingAPI}
+              className={cn(
+                "text-xs px-2 py-1 rounded",
+                isTestingAPI ? "bg-gray-100 text-gray-400" : "bg-blue-100 text-blue-700 hover:bg-blue-200"
+              )}
+            >
+              {isTestingAPI ? (
+                <div className="flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Testing...
+                </div>
+              ) : (
+                'Test OpenAI'
+              )}
+            </button>
+            <button
+              onClick={onClose}
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <X className="w-4 h-4 sm:w-5 sm:h-5" />
+            </button>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="p-3 sm:p-4 space-y-3 sm:space-y-4">

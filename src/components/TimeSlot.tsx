@@ -16,7 +16,7 @@ interface TimeSlotProps {
   isHovering: string | null;
   activeDropdown: string | null;
   onTimeSlotClick: (time: string) => void;
-  onDragStart: (e: React.DragEvent, taskId: string) => void;
+  onDragStart: (e: React.DragEvent, taskId: string, source: 'scheduledTasks' | 'parkingLot') => void;
   onDragEnd: () => void;
   onDragOver: (e: React.DragEvent, time: string) => void;
   onDrop: (e: React.DragEvent, time: string) => void;
@@ -177,7 +177,7 @@ export function TimeSlot({
                   isActive && "border-blue-300"
                 )}
                 draggable
-                onDragStart={(e) => onDragStart(e, task.id)}
+                onDragStart={(e) => onDragStart(e, task.id, 'scheduledTasks')}
                 onDragEnd={onDragEnd}
                 onMouseEnter={() => setIsHovering(task.id)}
                 onMouseLeave={() => setIsHovering(null)}
@@ -223,9 +223,7 @@ export function TimeSlot({
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (window.confirm('Are you sure you want to delete this task?')) {
-                              onDeleteTask(task.id, true);
-                            }
+                            onDeleteTask(task.id, true);
                           }}
                           className="p-1 text-gray-500 hover:text-red-600 rounded-full hover:bg-red-50"
                           title="Delete task"
