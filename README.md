@@ -2,34 +2,43 @@
 
 This project is a time tracking and productivity analysis application built with React, TypeScript, and Supabase for authentication and data storage.
 
-## Setup Instructions
+## Environment Setup
 
-### 1. Environment Variables
-
-Create a `.env` file in the root of your project with the following variables:
-
-```
-VITE_SUPABASE_URL=your_supabase_url_here
-VITE_SUPABASE_ANON_KEY=your_supabase_anon_key_here
-VITE_OPENAI_API_KEY=your_openai_api_key_here
+1. Copy `.env.example` to `.env`:
+```bash
+cp .env.example .env
 ```
 
-You can copy the `.env.example` file as a template.
+2. Fill in your environment variables in `.env`:
+```
+VITE_SUPABASE_URL=your_supabase_project_url
+VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
+VITE_OPENAI_API_KEY=your_openai_api_key  # Optional - for AI features
+```
 
-### 2. Supabase Setup
+⚠️ SECURITY NOTICE:
+- Never commit the `.env` file
+- Never share your API keys
+- The `.env` file is listed in `.gitignore` to prevent accidental commits
+- Use environment variables for all sensitive credentials
+- For testing scripts, use the template in `scripts/supabase-config.template.js`
 
-1. Create a new Supabase project at [https://supabase.com](https://supabase.com)
-2. Get your project URL and anon key from the API settings
-3. Run the SQL migration in `supabase/migrations/create_tables.sql` in the Supabase SQL editor
-4. Configure authentication in the Supabase dashboard:
-   - Enable Email/Password sign-in
-   - Set up email templates for password recovery
-
-### 3. Install Dependencies and Run
+## Installation
 
 ```bash
 npm install
+```
+
+## Development
+
+```bash
 npm run dev
+```
+
+## Building for Production
+
+```bash
+npm run build
 ```
 
 ## Features
